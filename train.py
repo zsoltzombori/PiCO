@@ -20,10 +20,12 @@ import numpy as np
 from model import PiCO
 from resnet import *
 from utils.utils_algo import *
-from utils.utils_loss import partial_loss, SupConLoss
+from utils.utils_loss import partial_loss, SupConLoss, prp_loss, logit_loss, nll_loss
 from utils.cub200 import load_cub200
 from utils.cifar10 import load_cifar10
 from utils.cifar100 import load_cifar100
+
+from datetime import datetime
 
 torch.set_printoptions(precision=2, sci_mode=False)
 
@@ -99,9 +101,12 @@ parser.add_argument('--partial_rate', default=0.1, type=float,
                     help='ambiguity level (q)')
 parser.add_argument('--hierarchical', action='store_true', 
                     help='for CIFAR-100 fine-grained training')
+parser.add_argument('--loss_type', default="cls", type=str,
+                    help='cls/prp/prp1/prp2/logit/nll/nll_on_logit')
 
 def main():
     args = parser.parse_args()
+    print(args)
     args.conf_ema_range = [float(item) for item in args.conf_ema_range.split(',')]
     iterations = args.lr_decay_epochs.split(',')
     args.lr_decay_epochs = list([])
@@ -124,18 +129,24 @@ def main():
         args.world_size = int(os.environ["WORLD_SIZE"])
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+
+
+    now = datetime.now()
+    timestamp = "{}.{}.{}.{}.{}".format(now.year, now.month, now.day, now.hour, now.minute)
     
-    model_path = 'ds_{ds}_pr_{pr}_lr_{lr}_ep_{ep}_ps_{ps}_lw_{lw}_pm_{pm}_arch_{arch}_heir_{heir}_sd_{seed}'.format(
-                                            ds=args.dataset,
-                                            pr=args.partial_rate,
-                                            lr=args.lr,
-                                            ep=args.epochs,
-                                            ps=args.prot_start,
-                                            lw=args.loss_weight,
-                                            pm=args.proto_m,
-                                            arch=args.arch,
-                                            seed=args.seed,
-                                            heir=args.hierarchical)
+    model_path = 'ds_{ds}_time_{timestamp}_pr_{pr}_lr_{lr}_ep_{ep}_ps_{ps}_lw_{lw}_pm_{pm}_arch_{arch}_heir_{heir}_sd_{seed}_loss_{loss}'.format(
+        ds=args.dataset,
+        pr=args.partial_rate,
+        lr=args.lr,
+        ep=args.epochs,
+        ps=args.prot_start,
+        lw=args.loss_weight,
+        pm=args.proto_m,
+        arch=args.arch,
+        seed=args.seed,
+        loss=args.loss_type,
+        timestamp=timestamp,
+        heir=args.hierarchical)
     args.exp_dir = os.path.join(args.exp_dir, model_path)
     if not os.path.exists(args.exp_dir):
         os.makedirs(args.exp_dir)
@@ -204,7 +215,7 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+        # raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather implementation (batch shuffle, queue update, etc.) in
         # this code only supports DistributedDataParallel.
@@ -249,9 +260,27 @@ def main_worker(gpu, ngpus_per_node, args):
     tempY = train_givenY.sum(dim=1).unsqueeze(1).repeat(1, train_givenY.shape[1])
     confidence = train_givenY.float()/tempY
     confidence = confidence.cuda()
+    train_givenY = train_givenY.cuda()
     # calculate confidence
 
-    loss_fn = partial_loss(confidence)
+    if args.loss_type == "cls":
+        loss_fn = partial_loss(confidence, train_givenY)
+    elif args.loss_type =="prp":
+        loss_fn = prp_loss(confidence, train_givenY, 0)
+    elif args.loss_type =="prp1":
+        loss_fn = prp_loss(confidence, train_givenY, 1)
+    elif args.loss_type =="prp2":
+        loss_fn = prp_loss(confidence, train_givenY, 2)
+    elif args.loss_type =="logit":
+        loss_fn = logit_loss(confidence, train_givenY)
+    elif args.loss_type =="nll":
+        loss_fn = nll_loss(confidence, train_givenY, on_logit=False)
+    elif args.loss_type =="nll_on_logit":
+        loss_fn = nll_loss(confidence, train_givenY, on_logit=True)
+        
+    else:
+        assert False, "Unknown loss type: " + args.loss_type
+        
     loss_cont_fn = SupConLoss()
     # set loss functions (with pseudo-targets maintained)
 
@@ -302,6 +331,7 @@ def train(train_loader, model, loss_fn, loss_cont_fn, optimizer, epoch, args, tb
     acc_proto = AverageMeter('Acc@Proto', ':2.2f')
     loss_cls_log = AverageMeter('Loss@Cls', ':2.2f')
     loss_cont_log = AverageMeter('Loss@Cont', ':2.2f')
+    sumprobs_log = AverageMeter('Loss@Sumprobs', ':2.2f')
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, acc_cls, acc_proto, loss_cls_log, loss_cont_log],
@@ -342,6 +372,7 @@ def train(train_loader, model, loss_fn, loss_cont_fn, optimizer, epoch, args, tb
         loss = loss_cls + args.loss_weight * loss_cont
         loss_cls_log.update(loss_cls.item())
         loss_cont_log.update(loss_cont.item())
+        sumprobs_log.update(loss_fn.sumprobs)
 
         # log accuracy
         acc = accuracy(cls_out, Y_true)[0]
@@ -365,6 +396,7 @@ def train(train_loader, model, loss_fn, loss_cont_fn, optimizer, epoch, args, tb
         tb_logger.log_value('Prototype Acc', acc_proto.avg, epoch)
         tb_logger.log_value('Classification Loss', loss_cls_log.avg, epoch)
         tb_logger.log_value('Contrastive Loss', loss_cont_log.avg, epoch)
+        tb_logger.log_value('Sumprobs', sumprobs_log.avg, epoch)
     
 
 def test(model, test_loader, args, epoch, tb_logger):

@@ -2,12 +2,130 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 
-class partial_loss(nn.Module):
-    def __init__(self, confidence, conf_ema_m=0.99):
+# component in (0, 1, 2)
+class logit_loss(nn.Module):
+    def __init__(self, confidence, labels):
         super().__init__()
         self.confidence = confidence
+        self.labels = labels
+        self.k = self.labels.sum(dim=1)
+        self.sumprobs = 0.0
+
+    def forward(self, outputs, index):
+        curr_labels = self.labels[index, :]
+        curr_k = self.k[index]
+
+        probs = F.softmax(outputs, dim=1)
+        sumprobs = (curr_labels * probs).sum(dim=1, keepdim=True)
+        with torch.no_grad():
+            pos_weights = (sumprobs - 1) * curr_labels
+            neg_weights = (1 - sumprobs) * (1 - curr_labels)
+            weights = pos_weights + neg_weights
+
+        logits = outputs
+        loss = (logits * weights).sum(dim=1).mean()
+        self.sumprobs = sumprobs.mean()
+        return loss
+
+    def set_conf_ema_m(self, epoch, args):
+        pass
+
+    def confidence_update(self, temp_un_conf, batch_index, batchY):
+        pass
+
+class nll_loss(nn.Module):
+    def __init__(self, confidence, labels, on_logit=False):
+        super().__init__()
+        self.confidence = confidence
+        self.labels = labels
+        self.sumprobs = 0.0
+        self.classes = labels.shape[1]
+        self.delta = torch.unsqueeze(torch.eye(self.classes), 0)
+        self.delta = self.delta.cuda()
+        self.on_logit = on_logit
+
+    def forward(self, outputs, index):
+        curr_labels = self.labels[index, :]
+
+        probs = F.softmax(outputs, dim=1)
+        sumprobs = (curr_labels * probs).sum(dim=1)
+        
+        if self.on_logit:
+            with torch.no_grad():
+                probs2 = torch.unsqueeze(probs, 2)
+                weight = probs2 * (self.delta - probs2)
+                weight = weight * torch.unsqueeze(curr_labels, 2)
+                weight = weight.sum(dim=1)
+            loss = - outputs * weight
+        else:
+            loss = sumprobs
+
+        self.sumprobs = sumprobs.mean()
+        loss = loss.mean()
+        return loss
+
+    def set_conf_ema_m(self, epoch, args):
+        pass
+
+    def confidence_update(self, temp_un_conf, batch_index, batchY):
+        pass
+
+    
+class prp_loss(nn.Module):
+    def __init__(self, confidence, labels, component=0):
+        super().__init__()
+        self.confidence = confidence
+        self.labels = labels
+        self.k = self.labels.sum(dim=1)
+        self.component = component
+        self.log_threshold = torch.log(torch.tensor(1e-10))
+        self.sumprobs = 0.0
+
+    def forward(self, outputs, index):
+        curr_labels = self.labels[index, :]
+        curr_k = self.k[index]
+        
+        probs = F.softmax(outputs, dim=1) * curr_labels        
+        logprobs = F.log_softmax(outputs, dim=1) * curr_labels
+        logprobs = torch.maximum(logprobs, self.log_threshold)
+
+        sumprobs = probs.sum(dim=1)
+        prp1 = torch.log(1e-5 + 1-sumprobs)
+        prp2 = logprobs.sum(dim=1) / curr_k
+        with torch.no_grad():
+            prp_weight = 1 - sumprobs
+        prp = (prp1 - prp2) * prp_weight
+        prp = torch.maximum(prp, torch.tensor(0.0))
+
+        prp3 = - torch.log(1e-5 + sumprobs)
+            
+        if self.component == 0:            
+            average_loss = prp.mean()
+        elif self.component == 1:
+            average_loss = prp1.mean()
+        elif self.component == 2:
+            average_loss = -prp2.mean()
+        elif self.component == 3:
+            average_loss = prp3.mean()
+
+        self.sumprobs = sumprobs.mean()
+        return average_loss
+
+    def set_conf_ema_m(self, epoch, args):
+        pass
+
+    def confidence_update(self, temp_un_conf, batch_index, batchY):
+        pass
+
+
+class partial_loss(nn.Module):
+    def __init__(self, confidence, labels, conf_ema_m=0.99):
+        super().__init__()
+        self.confidence = confidence
+        self.labels = labels
         self.init_conf = confidence.detach()
         self.conf_ema_m = conf_ema_m
+        self.sumprobs = 0.0
 
     def set_conf_ema_m(self, epoch, args):
         start = args.conf_ema_range[0]
@@ -18,6 +136,12 @@ class partial_loss(nn.Module):
         logsm_outputs = F.log_softmax(outputs, dim=1)
         final_outputs = logsm_outputs * self.confidence[index, :]
         average_loss = - ((final_outputs).sum(dim=1)).mean()
+
+        curr_labels = self.labels[index, :]
+        probs = F.softmax(outputs, dim=1) * curr_labels        
+        sumprobs = probs.sum(dim=1)
+        self.sumprobs = sumprobs.mean()
+
         return average_loss
     
     def confidence_update(self, temp_un_conf, batch_index, batchY):
