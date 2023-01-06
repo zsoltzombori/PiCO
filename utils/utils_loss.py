@@ -33,6 +33,9 @@ class logit_loss(nn.Module):
     def confidence_update(self, temp_un_conf, batch_index, batchY):
         pass
 
+# loss = - log(sum probs)
+# loss = sum_i (1/(sum probs) * p_i * (delta_ij - pj) * logit_j)
+# these two should be equal
 class nll_loss(nn.Module):
     def __init__(self, confidence, labels, on_logit=False):
         super().__init__()
@@ -48,17 +51,17 @@ class nll_loss(nn.Module):
         curr_labels = self.labels[index, :]
 
         probs = F.softmax(outputs, dim=1)
-        sumprobs = (curr_labels * probs).sum(dim=1)
+        sumprobs = (curr_labels * probs).sum(dim=1, keepdim=True)
         
         if self.on_logit:
             with torch.no_grad():
                 probs2 = torch.unsqueeze(probs, 2)
                 weight = probs2 * (self.delta - probs2)
                 weight = weight * torch.unsqueeze(curr_labels, 2)
-                weight = weight.sum(dim=1)
-            loss = - outputs * weight
+                weight = weight.sum(dim=1) / (sumprobs + 1e-8)
+            loss = - (outputs * weight).sum(dim=1)
         else:
-            loss = sumprobs
+            loss = - torch.log(sumprobs)
 
         self.sumprobs = sumprobs.mean()
         loss = loss.mean()
