@@ -56,7 +56,8 @@ class nll_loss(nn.Module):
         if self.on_logit:
             with torch.no_grad():
                 probs2 = torch.unsqueeze(probs, 2)
-                weight = probs2 * (self.delta - probs2)
+                # weight = probs2 * (self.delta - probs2)
+                weight = probs2 * torch.transpose(self.delta - probs2, 1, 2)
                 weight = weight * torch.unsqueeze(curr_labels, 2)
                 weight = weight.sum(dim=1) / (sumprobs + 1e-8)
             loss = - (outputs * weight).sum(dim=1)
@@ -114,6 +115,40 @@ class prp_loss(nn.Module):
         self.sumprobs = sumprobs.mean()
         return average_loss
 
+    def set_conf_ema_m(self, epoch, args):
+        pass
+
+    def confidence_update(self, temp_un_conf, batch_index, batchY):
+        pass
+
+class prp_all_loss(nn.Module):
+    def __init__(self, confidence, labels):
+        super().__init__()
+        self.confidence = confidence
+        self.labels = labels
+        self.k = self.labels.sum(dim=1)
+        self.classes = labels.shape[1]
+        self.log_threshold = torch.log(torch.tensor(1e-10))
+        self.sumprobs = 0.0
+
+    def forward(self, outputs, index):
+        curr_labels = self.labels[index, :]
+        # curr_k = self.k[index]
+        curr_k = curr_labels.sum(dim=1, keepdim=True)
+        curr_k_neg = (1-curr_labels).sum(dim=1, keepdim=True)
+        curr_k_neg = torch.maximum(curr_k_neg, torch.tensor(1.0))
+                
+        weight = - curr_labels  + (1-curr_labels) * curr_k / curr_k_neg
+        logprobs = F.log_softmax(outputs, dim=1)
+        logprobs = torch.maximum(logprobs, self.log_threshold)
+        loss = (logprobs * weight).sum(dim=1).mean()
+
+        probs = F.softmax(outputs, dim=1) * curr_labels        
+        sumprobs = probs.sum(dim=1)
+        self.sumprobs = sumprobs.mean()
+
+        return loss
+    
     def set_conf_ema_m(self, epoch, args):
         pass
 

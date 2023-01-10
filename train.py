@@ -20,7 +20,7 @@ import numpy as np
 from model import PiCO
 from resnet import *
 from utils.utils_algo import *
-from utils.utils_loss import partial_loss, SupConLoss, prp_loss, logit_loss, nll_loss
+from utils.utils_loss import partial_loss, SupConLoss, prp_loss, logit_loss, nll_loss, prp_all_loss
 from utils.cub200 import load_cub200
 from utils.cifar10 import load_cifar10
 from utils.cifar100 import load_cifar100
@@ -277,6 +277,8 @@ def main_worker(gpu, ngpus_per_node, args):
         loss_fn = nll_loss(confidence, train_givenY, on_logit=False)
     elif args.loss_type =="nll_on_logit":
         loss_fn = nll_loss(confidence, train_givenY, on_logit=True)
+    elif args.loss_type =="prp_all":
+        loss_fn = prp_all_loss(confidence, train_givenY)
         
     else:
         assert False, "Unknown loss type: " + args.loss_type
