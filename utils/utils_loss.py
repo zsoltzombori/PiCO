@@ -127,8 +127,7 @@ class prp_all_loss(nn.Module):
         self.confidence = confidence
         self.labels = labels
         self.k = self.labels.sum(dim=1)
-        self.classes = labels.shape[1]
-        self.log_threshold = torch.log(torch.tensor(1e-10))
+        self.log_threshold = torch.log(torch.tensor(1e-5))
         self.sumprobs = 0.0
 
     def forward(self, outputs, index):
@@ -137,11 +136,13 @@ class prp_all_loss(nn.Module):
         curr_k = curr_labels.sum(dim=1, keepdim=True)
         curr_k_neg = (1-curr_labels).sum(dim=1, keepdim=True)
         curr_k_neg = torch.maximum(curr_k_neg, torch.tensor(1.0))
-                
-        weight = - curr_labels  + (1-curr_labels) * curr_k / curr_k_neg
+
         logprobs = F.log_softmax(outputs, dim=1)
-        logprobs = torch.maximum(logprobs, self.log_threshold)
-        loss = (logprobs * weight).sum(dim=1).mean()
+        loss_allowed = - (curr_labels * logprobs).sum(dim=1)
+        logprobs_disallowed = torch.maximum(torch.tensor(0.0), logprobs - self.log_threshold)
+        loss_disallowed = ((1-curr_labels) * curr_k / curr_k_neg * logprobs_disallowed).sum(dim=1)
+
+        loss = (loss_allowed + loss_disallowed).mean()
 
         probs = F.softmax(outputs, dim=1) * curr_labels        
         sumprobs = probs.sum(dim=1)
